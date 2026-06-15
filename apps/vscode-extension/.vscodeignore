@@ -1,0 +1,7 @@
+src/**
+*.ts
+tsconfig.json
+tsconfig.webview.json
+vite.config.ts
+node_modules/**
+*.vsix

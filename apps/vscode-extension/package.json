@@ -1,0 +1,158 @@
+{
+  "name": "flint-vscode",
+  "displayName": "Flint",
+  "description": "AI task orchestration layer for VS Code.",
+  "version": "0.1.0",
+  "publisher": "flint",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/flint-dev/flint.git"
+  },
+  "type": "module",
+  "main": "./dist/extension.js",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:flint.queue",
+    "onCommand:flint.newTask",
+    "onCommand:flint.openQueue",
+    "onCommand:flint.configureProvider"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "flint.newTask",
+        "title": "Flint: New Task"
+      },
+      {
+        "command": "flint.openQueue",
+        "title": "Flint: Open Queue"
+      },
+      {
+        "command": "flint.configureProvider",
+        "title": "Flint: Configure Provider"
+      },
+      {
+        "command": "flint.cancelTask",
+        "title": "Flint: Cancel Task"
+      },
+      {
+        "command": "flint.retryTask",
+        "title": "Flint: Retry Task"
+      },
+      {
+        "command": "flint.openTaskDetail",
+        "title": "Flint: Open Task Detail"
+      },
+      {
+        "command": "flint.pauseAll",
+        "title": "Flint: Pause All"
+      },
+      {
+        "command": "flint.resumeAll",
+        "title": "Flint: Resume All"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "flint",
+          "title": "Flint",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "flint": [
+        {
+          "id": "flint.queue",
+          "type": "webview",
+          "name": "Task Queue"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Flint",
+      "properties": {
+        "flint.providers": {
+          "type": "array",
+          "default": [],
+          "description": "Configured Flint providers. API keys are stored in SecretStorage, not here."
+        },
+        "flint.maxConcurrentTasks": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "description": "Maximum number of tasks Flint can run concurrently."
+        },
+        "flint.defaultTaskPermissionMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "full_access",
+            "read_only"
+          ],
+          "default": "ask",
+          "description": "Default permission mode for new Flint tasks. Ask prompts before file writes or terminal commands; full_access runs without prompts; read_only denies writes and commands."
+        },
+        "flint.defaultJudgeProvider": {
+          "type": "string",
+          "default": "",
+          "description": "Provider id to use for judge tasks."
+        },
+        "flint.allowFileWrites": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Flint tasks to write workspace files."
+        },
+        "flint.allowTerminalCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow Flint tasks to run terminal commands."
+        },
+        "flint.telemetry.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable opt-in anonymous telemetry."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=esm --external:vscode --outfile=dist/extension.js --sourcemap",
+    "build:webview": "vite build",
+    "build": "npm run compile && npm run build:webview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"No extension tests yet\"",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@flint/core-types": "0.1.0",
+    "@flint/orchestrator": "0.1.0",
+    "@flint/providers": "0.1.0",
+    "@flint/storage": "0.1.0",
+    "@flint/ui-tokens": "0.1.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "vite": "^8.0.16"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "flint",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI task orchestration layer for VS Code.",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.4",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @flint/core-types && npm run build --workspace @flint/storage && npm run build --workspace @flint/scheduler && npm run build --workspace @flint/judge && npm run build --workspace @flint/providers && npm run build --workspace @flint/workspace-tools && npm run build --workspace @flint/orchestrator && npm run build --workspace @flint/ui-tokens && npm run build --workspace flint-vscode",
+    "test": "npm run test --workspace @flint/storage && npm run test --workspace @flint/scheduler && npm run test --workspace @flint/providers && npm run test --workspace @flint/judge && npm run test --workspace @flint/workspace-tools && npm run test --workspace @flint/orchestrator",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "package:vsix": "npm --workspace flint-vscode run package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.8"
+  }
+}

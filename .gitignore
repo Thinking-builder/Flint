@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+.vscode-test/
+*.vsix
+*.tsbuildinfo
+.DS_Store
+flint-state.json
+flint-state.sqlite
+flint-brand/

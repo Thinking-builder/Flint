@@ -1,0 +1,13 @@
+{
+  "flint.providers": [
+    {
+      "id": "ollama-local",
+      "type": "ollama",
+      "baseUrl": "http://localhost:11434",
+      "model": "llama3.1",
+      "enabled": true
+    }
+  ],
+  "flint.maxConcurrentTasks": 1,
+  "flint.telemetry.enabled": false
+}
