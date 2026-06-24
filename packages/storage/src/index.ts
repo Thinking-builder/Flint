@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Evaluation, Task, TaskEvent, TaskFilter } from "@flint/core-types";
+import type { Evaluation, Reflection, Task, TaskEvent, TaskFilter } from "@flint/core-types";
 
 export interface FlintStorage {
   init(): Promise<void>;
@@ -12,15 +12,24 @@ export interface FlintStorage {
   listEvents(taskId: string): Promise<TaskEvent[]>;
   upsertEvaluation(evaluation: Evaluation): Promise<void>;
   getEvaluation(taskId: string): Promise<Evaluation | undefined>;
+  appendReflection(reflection: Reflection): Promise<void>;
+  listReflections(query?: ReflectionQuery): Promise<Reflection[]>;
 }
 
 interface StateFile {
   tasks: Task[];
   events: TaskEvent[];
   evaluations: Evaluation[];
+  reflections?: Reflection[];
 }
 
-const emptyState = (): StateFile => ({ tasks: [], events: [], evaluations: [] });
+export interface ReflectionQuery {
+  taskType?: string;
+  projectFingerprint?: string;
+  limit?: number;
+}
+
+const emptyState = (): StateFile => ({ tasks: [], events: [], evaluations: [], reflections: [] });
 
 export class FileStorage implements FlintStorage {
   private state: StateFile = emptyState();
@@ -31,7 +40,8 @@ export class FileStorage implements FlintStorage {
     await mkdir(dirname(this.filePath), { recursive: true });
     try {
       const raw = await readFile(this.filePath, "utf8");
-      this.state = JSON.parse(raw) as StateFile;
+      this.state = { ...emptyState(), ...(JSON.parse(raw) as StateFile) };
+      this.state.reflections ??= [];
     } catch {
       this.state = emptyState();
       await this.flush();
@@ -89,6 +99,20 @@ export class FileStorage implements FlintStorage {
 
   async getEvaluation(taskId: string): Promise<Evaluation | undefined> {
     return this.state.evaluations.find((item) => item.taskId === taskId);
+  }
+
+  async appendReflection(reflection: Reflection): Promise<void> {
+    this.state.reflections ??= [];
+    this.state.reflections.push(reflection);
+    await this.flush();
+  }
+
+  async listReflections(query: ReflectionQuery = {}): Promise<Reflection[]> {
+    return (this.state.reflections ?? [])
+      .filter((reflection) => !query.taskType || reflection.taskType === query.taskType)
+      .filter((reflection) => !query.projectFingerprint || reflection.projectFingerprint === query.projectFingerprint)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, query.limit ?? 10);
   }
 
   private async flush(): Promise<void> {

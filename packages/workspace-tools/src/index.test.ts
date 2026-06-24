@@ -403,6 +403,27 @@ describe("WorkspaceTools", () => {
     // The key point is it doesn't hang or give a confusing error
     expect(evidence.status).toBe("failed");
   });
+
+  it("discovers safe verification commands from package scripts without executing them", async () => {
+    const root = await createRoot();
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "vitest run",
+          build: "tsc -p tsconfig.json",
+          typecheck: "tsc --noEmit",
+          postinstall: "dangerous-side-effect"
+        }
+      }),
+      "utf8"
+    );
+    const tools = new WorkspaceTools({ workspaceRoot: root });
+    const commands = await tools.discoverVerificationCommands();
+    expect(commands.map((command) => command.script)).toEqual(["test", "build", "typecheck"]);
+    expect(commands.some((command) => command.script === "postinstall")).toBe(false);
+    expect(commands[0]).toMatchObject({ kind: "test", command: "npm test", required: true });
+  });
 });
 
 function commandExists(command: string): boolean {

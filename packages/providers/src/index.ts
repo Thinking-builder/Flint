@@ -267,7 +267,7 @@ export class OpenAICompatibleProvider implements ProviderAdapter {
     const result = await this.chat(
       request.signal,
       planningSystemPrompt(),
-      `${formatTaskContext(request.task)}\n\nTask title: ${request.task.title}\nTask prompt: ${request.task.prompt}`
+      `${formatTaskContext(request.task)}\n\n${formatRelatedReflections(request.relatedReflections)}\n\nTask title: ${request.task.title}\nTask prompt: ${request.task.prompt}`
     );
     return parsePlanResult(result.content);
   }
@@ -427,7 +427,7 @@ export class OllamaProvider implements ProviderAdapter {
   async plan(request: PlanRequest): Promise<PlanResult> {
     const rawOutput = await this.generate(
       request.signal,
-      `${planningSystemPrompt()}\n\n${formatTaskContext(request.task)}\n\nTask title: ${request.task.title}\nTask prompt: ${request.task.prompt}`
+      `${planningSystemPrompt()}\n\n${formatTaskContext(request.task)}\n\n${formatRelatedReflections(request.relatedReflections)}\n\nTask title: ${request.task.title}\nTask prompt: ${request.task.prompt}`
     );
     return parsePlanResult(rawOutput);
   }
@@ -521,6 +521,24 @@ export function formatTaskContext(task: Task): string {
     "Do not ask the user which directory to use unless they explicitly request a different workspace.",
     recentEvidence ? `Recent tool evidence:\n${recentEvidence}` : undefined
   ].filter(Boolean).join("\n");
+}
+
+function formatRelatedReflections(reflections: PlanRequest["relatedReflections"]): string {
+  if (!reflections?.length) {
+    return "Related reflections: none.";
+  }
+  return [
+    "Related reflections from similar prior tasks:",
+    ...reflections.map((reflection) =>
+      [
+        `- ${reflection.id} (${reflection.taskType})`,
+        reflection.successfulStrategy ? `  Successful strategy: ${reflection.successfulStrategy}` : undefined,
+        reflection.failureModes.length ? `  Failure modes: ${reflection.failureModes.slice(0, 4).join("; ")}` : undefined,
+        reflection.commandsDiscovered.length ? `  Useful commands: ${reflection.commandsDiscovered.slice(0, 4).join("; ")}` : undefined,
+        reflection.avoidNextTime.length ? `  Avoid: ${reflection.avoidNextTime.slice(0, 4).join("; ")}` : undefined
+      ].filter(Boolean).join("\n")
+    )
+  ].join("\n");
 }
 
 export function formatJudgeRequest(request: JudgeRequest): string {

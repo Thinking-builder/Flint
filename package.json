@@ -10,8 +10,10 @@
     "packages/*"
   ],
   "scripts": {
+    "build:packages": "npm run build --workspace @flint/core-types && npm run build --workspace @flint/storage && npm run build --workspace @flint/scheduler && npm run build --workspace @flint/judge && npm run build --workspace @flint/providers && npm run build --workspace @flint/workspace-tools && npm run build --workspace @flint/orchestrator && npm run build --workspace @flint/ui-tokens",
     "build": "npm run build --workspace @flint/core-types && npm run build --workspace @flint/storage && npm run build --workspace @flint/scheduler && npm run build --workspace @flint/judge && npm run build --workspace @flint/providers && npm run build --workspace @flint/workspace-tools && npm run build --workspace @flint/orchestrator && npm run build --workspace @flint/ui-tokens && npm run build --workspace flint-vscode",
-    "test": "npm run test --workspace @flint/storage && npm run test --workspace @flint/scheduler && npm run test --workspace @flint/providers && npm run test --workspace @flint/judge && npm run test --workspace @flint/workspace-tools && npm run test --workspace @flint/orchestrator",
+    "test": "npm run build:packages && npm run test:packages",
+    "test:packages": "npm run test --workspace @flint/storage && npm run test --workspace @flint/scheduler && npm run test --workspace @flint/providers && npm run test --workspace @flint/judge && npm run test --workspace @flint/workspace-tools && npm run test --workspace @flint/orchestrator",
     "lint": "npm run lint --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "package:vsix": "npm --workspace flint-vscode run package"

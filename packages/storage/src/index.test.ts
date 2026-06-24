@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileStorage } from "./index.js";
-import type { Evaluation, Task, TaskEvent } from "@flint/core-types";
+import type { Evaluation, Reflection, Task, TaskEvent } from "@flint/core-types";
 
 let tempDirs: string[] = [];
 
@@ -71,5 +71,28 @@ describe("FileStorage", () => {
   it("is idempotent when deleting an unknown task", async () => {
     const storage = await createStorage();
     await expect(storage.deleteTask("missing")).resolves.toBeUndefined();
+  });
+
+  it("stores and retrieves recent reflections by task type and project fingerprint", async () => {
+    const storage = await createStorage();
+    const reflection = (id: string, createdAt: number, taskType = "code-edit"): Reflection => ({
+      id,
+      taskType,
+      projectFingerprint: "workspace-a",
+      failureModes: id === "reflection_1" ? ["missing tests"] : [],
+      successfulStrategy: id === "reflection_2" ? "Run targeted tests first" : undefined,
+      commandsDiscovered: ["npm test"],
+      filesTouched: ["src/index.ts"],
+      avoidNextTime: ["Do not skip deterministic checks"],
+      createdAt
+    });
+
+    await storage.appendReflection(reflection("reflection_1", 1));
+    await storage.appendReflection(reflection("reflection_2", 2));
+    await storage.appendReflection(reflection("reflection_3", 3, "docs"));
+
+    const matches = await storage.listReflections({ taskType: "code-edit", projectFingerprint: "workspace-a", limit: 1 });
+    expect(matches).toHaveLength(1);
+    expect(matches[0].id).toBe("reflection_2");
   });
 });

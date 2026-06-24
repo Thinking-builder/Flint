@@ -77,6 +77,8 @@ describe("FlintOrchestrator", () => {
     expect(detail.task.acceptanceCriteria?.length).toBeGreaterThan(0);
     expect(detail.evaluation?.criteriaResults?.length).toBeGreaterThan(0);
     expect(detail.task.plan?.steps.every((step) => step.status === "completed")).toBe(true);
+    expect(detail.task.taskGraph?.nodes).toHaveLength(3);
+    expect(detail.task.attempts?.[0].status).toBe("completed");
     expect(detail.events.map((event) => event.type)).toContain("task.plan_created");
     expect(detail.events.map((event) => event.type).filter((type) => type === "task.step_started")).toHaveLength(3);
     expect(detail.events.map((event) => event.type).filter((type) => type === "task.step_completed")).toHaveLength(3);
@@ -84,6 +86,7 @@ describe("FlintOrchestrator", () => {
     expect(detail.events.map((event) => event.type)).toContain("task.result_created");
     expect(detail.events.map((event) => event.type)).toContain("judge.completed");
     expect(detail.events.map((event) => event.type)).toContain("task.criteria_created");
+    expect(detail.events.map((event) => event.type)).toContain("reflection.created");
   });
 
   it("executes workspace file tools and records evidence when file writes are allowed", async () => {
@@ -120,6 +123,52 @@ describe("FlintOrchestrator", () => {
     const detail = await orchestrator.getTask(task.id);
     expect(detail.task.evidence?.some((item) => item.status === "denied")).toBe(true);
     expect(detail.evaluation?.criteriaResults?.some((item) => item.status === "unknown")).toBe(true);
+  });
+
+  it("uses canonical verdict so deterministic failures override a lenient judge pass", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "flint-workspace-test-"));
+    tempDirs.push(workspace);
+    const dir = await mkdtemp(join(tmpdir(), "flint-state-test-"));
+    tempDirs.push(dir);
+    const storage = new FileStorage(join(dir, "state.json"));
+    await storage.init();
+    const orchestrator = new FlintOrchestrator({
+      storage,
+      providers: [new LenientJudgeProvider()],
+      workspaceId: workspace,
+      maxConcurrentTasks: 1
+    });
+    const task = await orchestrator.createTask({
+      title: "Denied but judge passes",
+      prompt: "[[tool-write]] create a file",
+      workspaceId: workspace,
+      permissionMode: "read_only"
+    });
+
+    await waitFor(async () => (await orchestrator.getTask(task.id)).task.status === "review_required");
+    const detail = await orchestrator.getTask(task.id);
+    expect(detail.evaluation?.verdict).toBe("review_required");
+    expect(detail.evaluation?.overallVerdict).toBe("review_required");
+    expect(detail.evaluation?.findings.join("\n")).toContain("Canonical verdict review_required overrode judge verdict pass");
+  });
+
+  it("stores and loads reflections for similar future tasks", async () => {
+    const orchestrator = await createOrchestrator();
+    const first = await orchestrator.createTask({
+      title: "First docs task",
+      prompt: "Explain documentation architecture",
+      workspaceId: "workspace"
+    });
+    await waitFor(async () => (await orchestrator.getTask(first.id)).task.status === "completed");
+
+    const second = await orchestrator.createTask({
+      title: "Second docs task",
+      prompt: "Explain documentation architecture again",
+      workspaceId: "workspace"
+    });
+    await waitFor(async () => (await orchestrator.getTask(second.id)).task.status === "completed");
+    const detail = await orchestrator.getTask(second.id);
+    expect(detail.events.map((event) => event.type)).toContain("reflection.loaded");
   });
 
   it("asks for task tool permission and executes after approval", async () => {
@@ -234,7 +283,7 @@ describe("FlintOrchestrator", () => {
     expect(detail.task.evidence?.some((item) => item.status === "denied" && item.toolName === "policy")).toBe(true);
   });
 
-  it("revises the plan once when LLM evaluation requires more work", async () => {
+  it("revises the plan according to iteration policy when LLM evaluation requires more work", async () => {
     const orchestrator = await createOrchestrator();
     const task = await orchestrator.createTask({
       title: "Needs revision",
@@ -244,11 +293,14 @@ describe("FlintOrchestrator", () => {
 
     await waitFor(async () => (await orchestrator.getTask(task.id)).task.status === "review_required");
     const detail = await orchestrator.getTask(task.id);
-    expect(detail.task.evaluationAttempts).toBe(2);
-    expect(detail.task.result?.revision).toBe(2);
+    expect(detail.task.evaluationAttempts).toBe(3);
+    expect(detail.task.result?.revision).toBe(3);
     expect(detail.task.plan?.steps.length).toBeGreaterThan(3);
     expect(detail.evaluation?.verdict).toBe("review_required");
-    expect(detail.events.map((event) => event.type).filter((type) => type === "task.plan_revised")).toHaveLength(1);
+    expect(detail.task.progressLedger?.scoreHistory).toHaveLength(3);
+    expect(detail.task.attempts).toHaveLength(3);
+    expect(detail.events.map((event) => event.type).filter((type) => type === "task.plan_revised")).toHaveLength(2);
+    expect(detail.events.map((event) => event.type)).toContain("iteration.decision");
   });
 
   it("uses local evaluation fallback when provider judge fails", async () => {
@@ -404,5 +456,23 @@ class JudgeFailingProvider extends MockProvider implements ProviderAdapter {
 
   override async judge(_request: JudgeRequest) {
     throw new Error("fetch failed");
+  }
+}
+
+class LenientJudgeProvider extends MockProvider implements ProviderAdapter {
+  override async judge(request: JudgeRequest) {
+    const result = await super.judge({ ...request, evidence: [] });
+    return {
+      ...result,
+      verdict: "pass" as const,
+      findings: [],
+      criteriaResults: request.acceptanceCriteria?.map((criteria) => ({
+        criteriaId: criteria.id,
+        statement: criteria.statement,
+        status: "pass" as const,
+        rationale: "Lenient judge ignored deterministic evidence.",
+        evidenceRefs: []
+      })) ?? []
+    };
   }
 }

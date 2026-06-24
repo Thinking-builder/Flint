@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { computeVerdictFromCriteria, deriveAcceptanceCriteria, extractVerdictFromText, parseJudgeOutput, parseJudgeResult, runDeterministicChecks, runHeuristicJudge } from "./index.js";
+import {
+  applyCanonicalVerdict,
+  computeVerdictFromCriteria,
+  deriveAcceptanceCriteria,
+  deterministicVerdictFromChecks,
+  extractVerdictFromText,
+  mergeVerdicts,
+  parseJudgeOutput,
+  parseJudgeResult,
+  runDeterministicChecks,
+  runHeuristicJudge
+} from "./index.js";
 import type { Task, TaskEvidence, CriteriaResult } from "@flint/core-types";
 
 const task: Task = {
@@ -182,5 +193,44 @@ describe("computeVerdictFromCriteria", () => {
 
   it("returns review_required for empty criteria", () => {
     expect(computeVerdictFromCriteria([])).toBe("review_required");
+  });
+});
+
+describe("canonical verdicts", () => {
+  it("requires review when deterministic checks fail even if the judge passes", () => {
+    expect(
+      mergeVerdicts({
+        llmJudgeVerdict: "pass",
+        deterministicCheckVerdict: "review_required",
+        criteriaVerdict: "pass"
+      })
+    ).toBe("review_required");
+  });
+
+  it("treats criteria failure as a canonical failure", () => {
+    expect(
+      mergeVerdicts({
+        llmJudgeVerdict: "pass",
+        deterministicCheckVerdict: "pass",
+        criteriaVerdict: "fail"
+      })
+    ).toBe("fail");
+  });
+
+  it("derives deterministic review from failed checks", () => {
+    const result = runDeterministicChecks({ ...task, prompt: "Fix a file" }, []);
+    expect(deterministicVerdictFromChecks(result)).toBe("review_required");
+  });
+
+  it("applies the canonical verdict to the stored evaluation", () => {
+    const evaluation = runHeuristicJudge({ task, runSummary: "Completed successfully" });
+    const canonical = applyCanonicalVerdict(evaluation, {
+      llmJudgeVerdict: evaluation.verdict,
+      deterministicCheckVerdict: "pass",
+      criteriaVerdict: "review_required"
+    });
+    expect(canonical.verdict).toBe("review_required");
+    expect(canonical.overallVerdict).toBe("review_required");
+    expect(canonical.findings.join("\n")).toContain("overrode judge verdict pass");
   });
 });

@@ -275,6 +275,66 @@ export interface DeterministicResult {
   hasFailures: boolean;
 }
 
+export interface VerdictInputs {
+  llmJudgeVerdict?: JudgeVerdict;
+  deterministicCheckVerdict?: JudgeVerdict;
+  criteriaVerdict?: JudgeVerdict;
+  humanReviewVerdict?: JudgeVerdict;
+}
+
+export function mergeVerdicts(inputs: VerdictInputs): JudgeVerdict {
+  const verdicts = [
+    inputs.humanReviewVerdict,
+    inputs.deterministicCheckVerdict,
+    inputs.criteriaVerdict,
+    inputs.llmJudgeVerdict
+  ].filter((verdict): verdict is JudgeVerdict => Boolean(verdict));
+
+  if (verdicts.includes("fail")) {
+    return "fail";
+  }
+  if (verdicts.includes("review_required")) {
+    return "review_required";
+  }
+  return "pass";
+}
+
+export function deterministicVerdictFromChecks(result: DeterministicResult): JudgeVerdict {
+  if (result.checks.some((check) => check.type === "tool_failure" && !check.pass)) {
+    return "review_required";
+  }
+  if (result.checks.some((check) => check.type === "permission_denied" && !check.pass)) {
+    return "review_required";
+  }
+  if (result.checks.some((check) => check.type === "tests" && !check.pass)) {
+    return "review_required";
+  }
+  if (result.checks.some((check) => check.type === "has_changes" && !check.pass)) {
+    return "review_required";
+  }
+  return "pass";
+}
+
+export function applyCanonicalVerdict(
+  evaluation: Evaluation,
+  inputs: VerdictInputs,
+  context: { deterministicChecks?: DeterministicCheck[]; criteriaResults?: CriteriaResult[] } = {}
+): Evaluation {
+  const canonical = mergeVerdicts(inputs);
+  const findings = [...evaluation.findings];
+  if (canonical !== evaluation.verdict) {
+    findings.push(`Canonical verdict ${canonical} overrode judge verdict ${evaluation.verdict}.`);
+  }
+  return {
+    ...evaluation,
+    verdict: canonical,
+    overallVerdict: canonical,
+    findings,
+    deterministicChecks: context.deterministicChecks ?? evaluation.deterministicChecks,
+    criteriaResults: context.criteriaResults ?? evaluation.criteriaResults
+  };
+}
+
 export function runDeterministicChecks(task: Task, evidence: TaskEvidence[]): DeterministicResult {
   const checks: DeterministicCheck[] = [];
 

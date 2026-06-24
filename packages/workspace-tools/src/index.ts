@@ -11,6 +11,7 @@ import {
   type CommandOutcome,
   type CommandOutcomeCategory,
   type CommandSemanticStatus,
+  type VerificationKind,
   type TaskEvidence,
   type WorkspaceToolCall,
   type WorkspaceToolName
@@ -41,6 +42,13 @@ export interface WorkspaceToolsOptions {
   allowTerminalCommands?: boolean;
   testCommand?: string;
   diagnosticsResolver?: DiagnosticsResolver;
+}
+
+export interface VerificationCommand {
+  kind: VerificationKind;
+  script: string;
+  command: string;
+  required: boolean;
 }
 
 export class WorkspaceTools {
@@ -80,6 +88,29 @@ export class WorkspaceTools {
   async gitDiff(): Promise<string> {
     const result = await runCommand("git", ["diff", "--"], this.options.workspaceRoot, 10_000);
     return result.output;
+  }
+
+  async discoverVerificationCommands(): Promise<VerificationCommand[]> {
+    try {
+      const raw = await readFile(this.resolvePath("package.json"), "utf8");
+      const manifest = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+      const scripts = manifest.scripts ?? {};
+      const candidates: Array<{ script: string; kind: VerificationKind; required: boolean }> = [
+        { script: "test", kind: "test", required: true },
+        { script: "build", kind: "build", required: true },
+        { script: "typecheck", kind: "typecheck", required: false },
+        { script: "lint", kind: "lint", required: false },
+        { script: "compile", kind: "build", required: false }
+      ];
+      return candidates
+        .filter((candidate) => typeof scripts[candidate.script] === "string")
+        .map((candidate) => ({
+          ...candidate,
+          command: candidate.script === "test" ? "npm test" : `npm run ${candidate.script}`
+        }));
+    } catch {
+      return [];
+    }
   }
 
   async hasVerifiableArtifacts(): Promise<boolean> {

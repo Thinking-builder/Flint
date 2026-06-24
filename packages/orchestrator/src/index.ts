@@ -5,7 +5,11 @@ import {
   type CreateTaskInput,
   type Disposable,
   type Evaluation,
+  type IterationPolicy,
+  type ProgressLedger,
   type ProviderAdapter,
+  type Reflection,
+  type ResourceLock,
   type TaskPermissions,
   type Task,
   type TaskDetail,
@@ -22,10 +26,21 @@ import {
   type UserInputRequest,
   type WorkspaceToolCall
 } from "@flint/core-types";
-import { computeVerdictFromCriteria, deriveAcceptanceCriteria, evaluationFromJudgeResult, runDeterministicChecks, runHeuristicJudge } from "@flint/judge";
+import {
+  applyCanonicalVerdict,
+  computeVerdictFromCriteria,
+  deriveAcceptanceCriteria,
+  deterministicVerdictFromChecks,
+  evaluationFromJudgeResult,
+  runDeterministicChecks,
+  runHeuristicJudge
+} from "@flint/judge";
 import { Scheduler } from "@flint/scheduler";
 import type { FlintStorage } from "@flint/storage";
 import { WorkspaceTools, type DiagnosticsResolver } from "@flint/workspace-tools";
+import { finishAttempt, startAttempt } from "./attempts.js";
+import { createProgressLedger, decideNextIteration, normalizeIterationPolicy, updateProgressLedger } from "./iteration.js";
+import { taskGraphFromPlan } from "./task-graph.js";
 
 export interface OrchestratorOptions {
   storage: FlintStorage;
@@ -37,6 +52,7 @@ export interface OrchestratorOptions {
   allowFileWrites?: boolean;
   allowTerminalCommands?: boolean;
   testCommand?: string;
+  iterationPolicy?: Partial<IterationPolicy>;
   diagnosticsResolver?: DiagnosticsResolver;
   requestToolPermission?: (request: ToolPermissionRequest, task: Task) => Promise<ToolPermissionDecision>;
 }
@@ -74,6 +90,9 @@ export class FlintOrchestrator {
       workspaceId: input.workspaceId,
       budget: input.budget,
       permissions: this.createTaskPermissions(input.permissionMode ?? this.options.defaultPermissionMode ?? "ask"),
+      iterationPolicy: normalizeIterationPolicy({ ...this.options.iterationPolicy, ...input.iterationPolicy }),
+      progressLedger: createProgressLedger(),
+      resourceLocks: input.resourceLocks ?? inferResourceLocks(input.prompt),
       createdAt: timestamp,
       updatedAt: timestamp
     };
@@ -105,6 +124,7 @@ export class FlintOrchestrator {
     const updated = this.withStatus(task, "cancelled", { finishedAt: nowIso() });
     await this.options.storage.upsertTask(updated);
     this.releaseAgentForTask(id);
+    await this.persistReflection(updated, undefined, ["task cancelled"]);
     await this.record(id, "task.cancelled", {});
     void this.tick();
   }
@@ -127,7 +147,10 @@ export class FlintOrchestrator {
       plan: undefined,
       currentStepId: undefined,
       result: undefined,
-      evaluationAttempts: undefined
+      evaluationAttempts: undefined,
+      progressLedger: createProgressLedger(),
+      attempts: undefined,
+      taskGraph: undefined
     });
     await this.options.storage.upsertTask(updated);
     await this.record(id, "task.requeued", {});
@@ -252,6 +275,7 @@ export class FlintOrchestrator {
       });
       await this.options.storage.upsertTask(failed);
       this.releaseAgentForTask(task.id);
+      await this.persistReflection(failed, undefined, [failed.lastError ?? "task failed during planning"]);
       await this.record(task.id, "task.failed", { error: failed.lastError });
       void this.tick();
     } finally {
@@ -284,26 +308,35 @@ export class FlintOrchestrator {
 
   private async createPlan(task: Task, provider: ProviderAdapter, signal: AbortSignal): Promise<Task> {
     try {
-      const result = await provider.plan({ task, signal });
+      const relatedReflections = await this.relatedReflections(task);
+      if (relatedReflections.length) {
+        await this.record(task.id, "reflection.loaded", {
+          count: relatedReflections.length,
+          reflectionIds: relatedReflections.map((reflection) => reflection.id)
+        });
+      }
+      const result = await provider.plan({ task, signal, relatedReflections });
+      const plan = {
+        createdAt: nowIso(),
+        summary: result.summary,
+        steps: result.steps.slice(0, 6).map((step, index) => ({
+          id: createId("step"),
+          index: index + 1,
+          title: step.title,
+          detail: step.detail,
+          status: "planned" as const
+        }))
+      };
       return {
         ...task,
-        plan: {
-          createdAt: nowIso(),
-          summary: result.summary,
-          steps: result.steps.slice(0, 6).map((step, index) => ({
-            id: createId("step"),
-            index: index + 1,
-            title: step.title,
-            detail: step.detail,
-            status: "planned"
-          }))
-        },
+        plan,
+        taskGraph: taskGraphFromPlan(plan, { resourceLocks: task.resourceLocks }),
         updatedAt: nowIso()
       };
     } catch (error) {
       const plan = this.createFallbackPlan();
       await this.record(task.id, "task.plan_fallback", { error: error instanceof Error ? error.message : String(error) });
-      return { ...task, plan, updatedAt: nowIso() };
+      return { ...task, plan, taskGraph: taskGraphFromPlan(plan, { resourceLocks: task.resourceLocks }), updatedAt: nowIso() };
     }
   }
 
@@ -327,9 +360,16 @@ export class FlintOrchestrator {
     this.setAgent(task.agentId, { status: "running", taskId: task.id });
 
     const plan = task.plan ?? this.createFallbackPlan();
-    let current = this.withStatus({ ...task, plan }, "running", { startedAt: task.startedAt ?? nowIso() });
+    let current = this.withStatus(
+      { ...task, plan, taskGraph: task.taskGraph ?? taskGraphFromPlan(plan, { resourceLocks: task.resourceLocks }) },
+      "running",
+      { startedAt: task.startedAt ?? nowIso() }
+    );
+    current = await this.ensureRunningAttempt(current);
     await this.options.storage.upsertTask(current);
     await this.record(task.id, "task.running", { providerId: provider.id, model: provider.model, stepCount: plan.steps.length });
+    await this.record(task.id, "task.graph_ready", { nodeCount: current.taskGraph?.nodes.length ?? 0 });
+    const policy = normalizeIterationPolicy(current.iterationPolicy);
 
     for (const step of current.plan?.steps ?? []) {
       if (step.status === "completed" || step.status === "skipped") {
@@ -341,7 +381,7 @@ export class FlintOrchestrator {
       try {
         let finalSummary = "";
         const seenToolBatches = new Set<string>();
-        for (let iteration = 0; iteration < 3; iteration += 1) {
+        for (let iteration = 0; iteration < policy.maxToolIterationsPerStep; iteration += 1) {
           const runningStep = current.plan!.steps.find((item) => item.id === step.id)!;
           const completedSteps = current.plan!.steps.filter((item) => item.status === "completed");
           const result = await provider.runStep({ task: current, step: runningStep, completedSteps, signal: controller.signal });
@@ -364,6 +404,7 @@ export class FlintOrchestrator {
             await this.options.storage.upsertTask(waiting);
             this.setAgent(task.agentId, { status: "waiting_user", taskId: task.id });
             await this.record(task.id, "agent.waiting_user", { stepId: step.id, question: request.question });
+            await this.persistReflection(waiting, undefined, ["waiting for user input"]);
             return;
           }
 
@@ -399,6 +440,7 @@ export class FlintOrchestrator {
           });
           await this.options.storage.upsertTask(review);
           this.releaseAgentForTask(task.id);
+          await this.persistReflection(review, undefined, [review.lastError ?? "revision provider failed"]);
           await this.record(task.id, "task.revision_provider_failed", { stepId: step.id, error: review.lastError });
           await this.record(task.id, "task.finished", { status: review.status, error: review.lastError });
           void this.tick();
@@ -415,6 +457,7 @@ export class FlintOrchestrator {
         });
         await this.options.storage.upsertTask(failed);
         this.releaseAgentForTask(task.id);
+        await this.persistReflection(failed, undefined, [failed.lastError ?? "step failed"]);
         await this.record(task.id, "task.step_failed", { stepId: step.id, error: failed.lastError });
         await this.record(task.id, "task.failed", { error: failed.lastError });
         void this.tick();
@@ -437,7 +480,6 @@ export class FlintOrchestrator {
     await this.record(task.id, "task.judging", {});
     await this.record(task.id, "judge.started", { revision: result.revision });
 
-    // Run deterministic pre-checks before LLM judge
     const deterministicResult = runDeterministicChecks(judging, judging.evidence ?? []);
     await this.record(task.id, "judge.deterministic_checks", {
       allPassed: deterministicResult.allPassed,
@@ -448,48 +490,68 @@ export class FlintOrchestrator {
     const attempts = judging.evaluationAttempts ?? 0;
     let evaluation = await this.evaluateTaskWithFallback(provider, judging, result, runSummary, controller.signal);
 
-    // Attach deterministic check results to evaluation
-    evaluation.deterministicChecks = deterministicResult.checks;
-
-    // If deterministic checks found failures, override verdict if LLM was too lenient
-    if (deterministicResult.hasFailures && evaluation.verdict === "pass") {
-      evaluation.verdict = "review_required";
-      evaluation.overallVerdict = "review_required";
-      evaluation.findings = [...evaluation.findings, "Deterministic checks found issues that override the LLM judge pass verdict."];
-    }
-
-    // If criteria results are available, use them to compute verdict
-    if (evaluation.criteriaResults?.length) {
-      const criteriaVerdict = computeVerdictFromCriteria(evaluation.criteriaResults);
-      if (criteriaVerdict !== evaluation.verdict) {
-        evaluation.overallVerdict = criteriaVerdict;
+    const criteriaVerdict = evaluation.criteriaResults?.length ? computeVerdictFromCriteria(evaluation.criteriaResults) : undefined;
+    evaluation = applyCanonicalVerdict(
+      evaluation,
+      {
+        llmJudgeVerdict: evaluation.verdict,
+        deterministicCheckVerdict: deterministicVerdictFromChecks(deterministicResult),
+        criteriaVerdict
+      },
+      {
+        deterministicChecks: deterministicResult.checks,
+        criteriaResults: evaluation.criteriaResults
       }
-    }
+    );
+    const attemptCount = attempts + 1;
+    const ledger = updateProgressLedger(judging.progressLedger, evaluation, {
+      deterministicChecks: deterministicResult.checks,
+      criteriaResults: evaluation.criteriaResults,
+      evidence: judging.evidence,
+      policy,
+      attempts: attemptCount
+    });
+    const finalizedAttempts = this.finishCurrentAttempt(judging, evaluation, ledger);
+    const judged: Task = { ...judging, progressLedger: ledger, attempts: finalizedAttempts, evaluationAttempts: attemptCount, updatedAt: nowIso() };
 
     await this.options.storage.upsertEvaluation(evaluation);
+    await this.options.storage.upsertTask(judged);
     await this.record(task.id, "judge.completed", {
       verdict: evaluation.verdict,
+      overallVerdict: evaluation.overallVerdict,
       confidence: evaluation.confidence,
       revision: evaluation.revision,
       deterministicPassed: deterministicResult.allPassed
     });
+    await this.record(task.id, "progress.updated", {
+      score: ledger.score,
+      stagnationCount: ledger.stagnationCount,
+      passedChecks: ledger.passedChecks.length,
+      failedChecks: ledger.failedChecks.length,
+      blockers: ledger.blockers.length
+    });
 
-    if (evaluation.verdict !== "pass" && attempts < 1) {
-      const revised = this.revisePlanAfterEvaluation(judging, evaluation, attempts + 1);
+    const decision = decideNextIteration(policy, ledger, evaluation, attemptCount);
+    await this.record(task.id, "iteration.decision", decision);
+
+    if (decision.action === "continue") {
+      const revised = this.revisePlanAfterEvaluation(judged, evaluation, attemptCount);
       await this.options.storage.upsertTask(revised);
       await this.record(task.id, "task.plan_revised", {
         revision: result.revision + 1,
         stepCount: revised.plan?.steps.length ?? 0,
-        suggestedNextSteps: evaluation.suggestedNextSteps ?? []
+        suggestedNextSteps: evaluation.suggestedNextSteps ?? [],
+        hypothesis: decision.nextHypothesis?.summary
       });
       await this.runSteps(revised);
       return;
     }
 
-    const finalStatus = evaluation.verdict === "pass" ? "completed" : "review_required";
-    const finalTask = this.withStatus(judging, finalStatus, { finishedAt: nowIso(), evaluationAttempts: attempts + 1 });
+    const finalStatus = decision.action === "complete" ? "completed" : decision.action === "failed" ? "failed" : "review_required";
+    const finalTask = this.withStatus(judged, finalStatus, { finishedAt: nowIso() });
     await this.options.storage.upsertTask(finalTask);
     this.releaseAgentForTask(task.id);
+    await this.persistReflection(finalTask, evaluation);
     await this.record(task.id, "task.finished", { status: finalTask.status });
     void this.tick();
   }
@@ -872,27 +934,98 @@ export class FlintOrchestrator {
       ? evaluation.suggestedNextSteps
       : evaluationRepairSteps(evaluation);
     const startIndex = plan.steps.length;
+    const revisedPlan: TaskPlan = {
+      ...plan,
+      summary: `${plan.summary}\n\nRevision ${evaluationAttempts + 1}: address judge findings.`,
+      steps: [
+        ...plan.steps,
+        ...nextSteps.slice(0, 4).map((step, index) => ({
+          id: createId("step"),
+          index: startIndex + index + 1,
+          title: step.title,
+          detail: step.detail,
+          status: "planned" as const
+        }))
+      ]
+    };
     return {
       ...task,
       status: "running",
       currentStepId: undefined,
       evaluationAttempts,
-      plan: {
-        ...plan,
-        summary: `${plan.summary}\n\nRevision ${evaluationAttempts + 1}: address judge findings.`,
-        steps: [
-          ...plan.steps,
-          ...nextSteps.slice(0, 4).map((step, index) => ({
-            id: createId("step"),
-            index: startIndex + index + 1,
-            title: step.title,
-            detail: step.detail,
-            status: "planned" as const
-          }))
-        ]
-      },
+      plan: revisedPlan,
+      taskGraph: taskGraphFromPlan(revisedPlan, { resourceLocks: task.resourceLocks }),
       updatedAt: nowIso()
     };
+  }
+
+  private async ensureRunningAttempt(task: Task): Promise<Task> {
+    const running = task.attempts?.some((attempt) => attempt.status === "running");
+    if (running) {
+      return task;
+    }
+    const revision = (task.result?.revision ?? 0) + 1;
+    const attempt = startAttempt(task.id, `revision_${revision}: ${task.plan?.summary ?? "Execute task"}`);
+    const updated = { ...task, attempts: [...(task.attempts ?? []), attempt], updatedAt: nowIso() };
+    await this.options.storage.upsertTask(updated);
+    await this.record(task.id, "attempt.started", { attemptId: attempt.id, strategy: attempt.strategy });
+    return updated;
+  }
+
+  private finishCurrentAttempt(task: Task, evaluation: Evaluation, ledger: ProgressLedger) {
+    const attempts = task.attempts ?? [];
+    let index = -1;
+    for (let attemptIndex = attempts.length - 1; attemptIndex >= 0; attemptIndex -= 1) {
+      if (attempts[attemptIndex].status === "running") {
+        index = attemptIndex;
+        break;
+      }
+    }
+    if (index < 0) {
+      return attempts;
+    }
+    const latestDiff = task.evidence?.filter((item) => item.toolName === "gitDiff" && item.output?.trim()).at(-1);
+    const verificationResults = [...ledger.passedChecks, ...ledger.failedChecks].slice(-12);
+    const finished = finishAttempt(attempts[index], {
+      status: evaluation.overallVerdict === "pass" ? "completed" : "failed",
+      patchSummary: latestDiff?.summary ?? task.result?.summary,
+      verificationResults,
+      score: ledger.score
+    });
+    return attempts.map((attempt, attemptIndex) => (attemptIndex === index ? finished : attempt));
+  }
+
+  private async relatedReflections(task: Task): Promise<Reflection[]> {
+    return this.options.storage.listReflections({
+      taskType: taskTypeFor(task),
+      projectFingerprint: projectFingerprintFor(task),
+      limit: 3
+    });
+  }
+
+  private async persistReflection(task: Task, evaluation?: Evaluation, failureModes: string[] = []): Promise<void> {
+    const evidence = task.evidence ?? [];
+    const reflection: Reflection = {
+      id: createId("reflection"),
+      taskType: taskTypeFor(task),
+      projectFingerprint: projectFingerprintFor(task),
+      failureModes: [
+        ...failureModes,
+        ...(evaluation?.findings ?? []),
+        ...(task.progressLedger?.blockers.map((blocker) => blocker.summary) ?? [])
+      ].slice(0, 12),
+      successfulStrategy: task.status === "completed" ? task.attempts?.at(-1)?.strategy : undefined,
+      commandsDiscovered: Array.from(new Set(evidence.map((item) => item.command).filter((command): command is string => Boolean(command)))).slice(0, 12),
+      filesTouched: Array.from(new Set(evidence.map((item) => item.path).filter((path): path is string => Boolean(path)))).slice(0, 20),
+      avoidNextTime: task.status === "completed" ? [] : ["Do not mark the task complete without canonical verdict and deterministic evidence."],
+      createdAt: Date.now()
+    };
+    await this.options.storage.appendReflection(reflection);
+    await this.record(task.id, "reflection.created", {
+      reflectionId: reflection.id,
+      taskType: reflection.taskType,
+      failureModeCount: reflection.failureModes.length
+    });
   }
 
   private async markStep(
@@ -1040,4 +1173,49 @@ function safeToolInput(call: WorkspaceToolCall): Record<string, unknown> {
     return { command: call.input.command };
   }
   return call.input;
+}
+
+function inferResourceLocks(prompt: string): ResourceLock[] {
+  if (!/\b(write|patch|edit|implement|fix|update|create|delete|remove|modify|refactor)\b/i.test(prompt)) {
+    return [];
+  }
+  const locks: ResourceLock[] = [];
+  const pathPattern = /(?:`([^`]+\.[A-Za-z0-9]+)`|["']([^"']+\.[A-Za-z0-9]+)["'])/g;
+  let match: RegExpExecArray | null;
+  while ((match = pathPattern.exec(prompt))) {
+    const path = match[1] ?? match[2];
+    if (path && !path.startsWith("/") && !path.includes("..")) {
+      locks.push({ type: "file", path, mode: "write" });
+    }
+  }
+  return dedupeResourceLocks(locks);
+}
+
+function dedupeResourceLocks(locks: ResourceLock[]): ResourceLock[] {
+  const byKey = new Map<string, ResourceLock>();
+  for (const lock of locks) {
+    byKey.set(`${lock.type}:${lock.path ?? ""}:${lock.mode}`, lock);
+  }
+  return Array.from(byKey.values());
+}
+
+function taskTypeFor(task: Task): string {
+  const text = `${task.title}\n${task.prompt}`.toLowerCase();
+  if (/test|lint|build|typecheck|compile/u.test(text)) {
+    return "verification";
+  }
+  if (/readme|docs?|documentation|文档/u.test(text)) {
+    return "documentation";
+  }
+  if (/fix|bug|error|failed|repair/u.test(text)) {
+    return "bugfix";
+  }
+  if (/implement|add|create|feature|update|refactor/u.test(text)) {
+    return "code-edit";
+  }
+  return "general";
+}
+
+function projectFingerprintFor(task: Task): string {
+  return task.workspaceId;
 }

@@ -55,6 +55,10 @@ After installing dependencies, open `apps/vscode-extension` in VS Code or run th
 
 Flint does not run a hosted backend in this MVP. Workspace content is only sent to configured providers when a task is executed. API keys are stored through VS Code SecretStorage and are not sent to the webview.
 
+## Architecture Notes
+
+See [Agentic Orchestration Notes](docs/agentic-orchestration.md) for the current iteration policy, progress ledger, canonical verdict, resource lock, task graph, attempt, and reflection-memory design.
+
 ## License
 
 Apache-2.0.

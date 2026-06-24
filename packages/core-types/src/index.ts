@@ -39,6 +39,12 @@ export type CriteriaStatus = "pass" | "fail" | "unknown";
 export type TaskPermissionMode = "ask" | "full_access" | "read_only";
 export type ToolPermissionScope = "file_write" | "terminal";
 export type ToolPermissionDecision = "approved_once" | "approved_for_task" | "full_access" | "denied";
+export type ResourceLockType = "file" | "directory" | "workspace" | "terminal" | "git-worktree";
+export type ResourceLockMode = "read" | "write";
+export type NodeStatus = "planned" | "ready" | "running" | "completed" | "failed" | "skipped" | "blocked";
+export type VerificationKind = "command" | "test" | "lint" | "typecheck" | "build" | "diff" | "diagnostic" | "manual";
+export type CheckStatus = "pass" | "fail" | "unknown";
+export type AttemptStatus = "planned" | "running" | "completed" | "failed" | "abandoned" | "selected";
 export type WorkspaceToolName =
   | "glob"
   | "grep"
@@ -79,6 +85,11 @@ export interface Task {
   evidence?: TaskEvidence[];
   acceptanceCriteria?: AcceptanceCriteria[];
   permissions?: TaskPermissions;
+  iterationPolicy?: IterationPolicy;
+  progressLedger?: ProgressLedger;
+  taskGraph?: TaskGraph;
+  attempts?: Attempt[];
+  resourceLocks?: ResourceLock[];
 }
 
 export interface TaskPlanStep {
@@ -97,6 +108,121 @@ export interface TaskPlan {
   createdAt: string;
   summary: string;
   steps: TaskPlanStep[];
+}
+
+export interface ResourceLock {
+  type: ResourceLockType;
+  path?: string;
+  mode: ResourceLockMode;
+}
+
+export interface VerificationSpec {
+  kind: VerificationKind;
+  command?: string;
+  expectedEvidence?: string[];
+  required: boolean;
+}
+
+export interface TaskGraphNode {
+  id: string;
+  title: string;
+  objective: string;
+  dependsOn: string[];
+  status: NodeStatus;
+  requiredEvidence: string[];
+  allowedTools: WorkspaceToolName[];
+  resourceLocks: ResourceLock[];
+  verification: VerificationSpec[];
+  sourceStepId?: string;
+}
+
+export interface TaskGraph {
+  createdAt: string;
+  summary: string;
+  nodes: TaskGraphNode[];
+}
+
+export interface IterationPolicy {
+  maxAttempts: number;
+  maxToolIterationsPerStep: number;
+  maxTotalToolCalls: number;
+  maxRuntimeMs?: number;
+  maxCostUsd?: number;
+  stagnationWindow: number;
+  minProgressDelta: number;
+  allowBranching: boolean;
+  requireHumanReviewOnRisk: boolean;
+}
+
+export interface CheckResult {
+  id: string;
+  name: string;
+  status: CheckStatus;
+  summary: string;
+  evidenceRefs: string[];
+  weight?: number;
+}
+
+export interface Finding {
+  id: string;
+  summary: string;
+  source: "judge" | "deterministic" | "criteria" | "tool" | "human";
+  severity: "info" | "warning" | "error" | "blocking";
+  evidenceRefs: string[];
+}
+
+export interface Blocker {
+  id: string;
+  summary: string;
+  source: "policy" | "tool" | "environment" | "budget" | "human" | "stagnation";
+  recoverable: boolean;
+  evidenceRefs: string[];
+}
+
+export interface Hypothesis {
+  id: string;
+  summary: string;
+  confidence: number;
+  nextStep?: string;
+}
+
+export interface ProgressLedger {
+  score: number;
+  scoreHistory: number[];
+  passedChecks: CheckResult[];
+  failedChecks: CheckResult[];
+  fixedFindings: Finding[];
+  openFindings: Finding[];
+  blockers: Blocker[];
+  currentHypotheses: Hypothesis[];
+  stagnationCount: number;
+  totalToolCalls: number;
+  attempts: number;
+  updatedAt: string;
+}
+
+export interface Attempt {
+  id: string;
+  taskId: string;
+  strategy: string;
+  status: AttemptStatus;
+  startedAt: number;
+  finishedAt?: number;
+  patchSummary?: string;
+  verificationResults: CheckResult[];
+  score?: number;
+}
+
+export interface Reflection {
+  id: string;
+  taskType: string;
+  projectFingerprint: string;
+  failureModes: string[];
+  successfulStrategy?: string;
+  commandsDiscovered: string[];
+  filesTouched: string[];
+  avoidNextTime: string[];
+  createdAt: number;
 }
 
 export interface TaskResult {
@@ -277,6 +403,8 @@ export interface CreateTaskInput {
   permissionMode?: TaskPermissionMode;
   preferredAgentTags?: string[];
   budget?: TaskBudget;
+  resourceLocks?: ResourceLock[];
+  iterationPolicy?: Partial<IterationPolicy>;
 }
 
 export interface TaskFilter {
@@ -292,6 +420,7 @@ export interface RunRequest {
 export interface PlanRequest {
   task: Task;
   signal: AbortSignal;
+  relatedReflections?: Reflection[];
 }
 
 export interface PlanResult {
